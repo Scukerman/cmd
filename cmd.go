@@ -28,6 +28,8 @@ type Cmd struct {
 	stderr    *output
 	status    Status
 	doneChan  chan Status
+
+	cmd *exec.Cmd
 }
 
 // Status represents the status of a Cmd. It is valid during the entire lifecycle
@@ -120,7 +122,7 @@ func (c *Cmd) Stop() error {
 	// Signal the process group (-pid), not just the process, so that the process
 	// and all its children are signaled. Else, child procs can keep running and
 	// keep the stdout/stderr fd open and cause cmd.Wait to hang.
-	return syscall.Kill(-c.status.PID, syscall.SIGTERM)
+	return c.killProcess()
 }
 
 // Status returns the Status of the command at any time. It is safe to call
@@ -165,25 +167,25 @@ func (c *Cmd) run() {
 	// //////////////////////////////////////////////////////////////////////
 	// Setup command
 	// //////////////////////////////////////////////////////////////////////
-	cmd := exec.Command(c.Name, c.Args...)
+	c.cmd = exec.Command(c.Name, c.Args...)
 
 	// Set process group ID so the cmd and all its children become a new
 	// process grouc. This allows Stop to SIGTERM thei cmd's process group
 	// without killing this process (i.e. this code here).
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	c.setpgid()
 
 	// Write stdout and stderr to buffers that are safe to read while writing
 	// and don't cause a race condition.
 	c.stdout = newOutput()
 	c.stderr = newOutput()
-	cmd.Stdout = c.stdout
-	cmd.Stderr = c.stderr
+	c.cmd.Stdout = c.stdout
+	c.cmd.Stderr = c.stderr
 
 	// //////////////////////////////////////////////////////////////////////
 	// Start command
 	// //////////////////////////////////////////////////////////////////////
 	now := time.Now()
-	if err := cmd.Start(); err != nil {
+	if err := c.cmd.Start(); err != nil {
 		c.Lock()
 		c.status.Error = err
 		c.status.StartTs = now.UnixNano()
@@ -196,7 +198,7 @@ func (c *Cmd) run() {
 	// Set initial status
 	c.Lock()
 	c.startTime = now              // command is running
-	c.status.PID = cmd.Process.Pid // command is running
+	c.status.PID = c.cmd.Process.Pid // command is running
 	c.status.StartTs = now.UnixNano()
 	c.started = true
 	c.Unlock()
@@ -204,7 +206,7 @@ func (c *Cmd) run() {
 	// //////////////////////////////////////////////////////////////////////
 	// Wait for command to finish or be killed
 	// //////////////////////////////////////////////////////////////////////
-	err := cmd.Wait()
+	err := c.cmd.Wait()
 
 	// Get exit code of the command
 	exitCode := 0
